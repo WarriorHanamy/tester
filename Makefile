@@ -35,23 +35,32 @@ APP_DIR ?= /opt/app
 TEST_TIMEOUT ?= 300
 TEST_COMMAND ?= python3 $(APP_DIR)/inference_smoke_test.py
 
-.PHONY: all build test clean help verify-docker verify-gpu
+.PHONY: all build test clean help \
+        verify-docker verify-host-gpu inspect-base-image verify-image-runtime smoke-test
 
 # Default target
-all: build test
+all: build smoke-test
 
 # Help target
 help:
 	@echo "TensorRT Inference Docker Build System"
 	@echo ""
 	@echo "Available targets:"
-	@echo "  build      - Build the Docker image"
-	@echo "  test       - Run smoke test in container"
-	@echo "  clean      - Remove Docker image and containers"
-	@echo "  verify     - Verify Docker and GPU setup (comprehensive check)"
-	@echo "  verify-docker - Check Docker installation only"
-	@echo "  verify-gpu - Check GPU and Docker GPU support"
-	@echo "  help       - Show this help message"
+	@echo "  build              - Build the Docker image"
+	@echo "  smoke-test         - Run application smoke test (end-to-end usability)"
+	@echo "  test               - Alias for smoke-test"
+	@echo "  clean              - Remove Docker image and containers"
+	@echo ""
+	@echo "Verification & diagnostics:"
+	@echo "  verify-docker      - Check Docker installation/daemon"
+	@echo "  verify-host-gpu    - Check host GPU + Docker GPU compute readiness"
+	@echo "  inspect-base-image - Inspect base image toolkit (diagnostic only)"
+	@echo "  verify-image-runtime - Verify built image runtime contract (preflight)"
+	@echo ""
+	@echo "Development:"
+	@echo "  shell              - Open interactive shell in container"
+	@echo "  debug              - Start debug container"
+	@echo "  help               - Show this help message"
 	@echo ""
 	@echo "Configuration (via environment or make variables):"
 	@echo "  IMAGE_NAME          - Docker image name (default: $(IMAGE_NAME))"
@@ -61,6 +70,7 @@ help:
 	@echo "  PYTHON_VERSION      - Python version (default: $(PYTHON_VERSION))"
 	@echo "  TENSORRT_VERSION    - TensorRT version (default: $(TENSORRT_VERSION))"
 	@echo "  TEST_TIMEOUT        - Test timeout in seconds (default: $(TEST_TIMEOUT))"
+	@echo "  GPU_DEVICE          - GPU device(s) to expose (default: $(GPU_DEVICE))"
 
 # Prepare model files for Docker build
 prepare-models:
@@ -76,9 +86,7 @@ prepare-models:
 	cp -r "$$LATEST_MODEL" "$(LOCAL_MODEL_DIR)/$(MODEL_NAME)/"
 	@echo "Model files prepared in $(LOCAL_MODEL_DIR)/$(MODEL_NAME)/"
 
-# Verify Docker and GPU setup
-verify: verify-docker verify-gpu
-
+# Verify Docker only (no GPU assumptions)
 verify-docker:
 	@echo "Verifying Docker installation..."
 	@docker --version || (echo "Docker not installed" && exit 1)
@@ -87,9 +95,20 @@ verify-docker:
 	@docker compose version >/dev/null 2>&1 && echo "Docker Compose available" || echo "Docker Compose not available (optional)"
 	@echo "Docker is ready"
 
-verify-gpu:
-	@echo "Running comprehensive GPU and Docker support check..."
-	@BASE_IMAGE=$(BASE_IMAGE) TARGET_IMAGE=$(IMAGE_NAME):$(IMAGE_TAG) ./dockerfiles/check-gpu-info.sh
+# Verify host GPU compute readiness (independent of built image)
+verify-host-gpu:
+	@echo "Running host GPU + Docker compute readiness check..."
+	@BASE_IMAGE=$(BASE_IMAGE) ./dockerfiles/check-host-gpu.sh
+
+# Optional: inspect base image toolkit versions (diagnostic only)
+inspect-base-image:
+	@echo "Inspecting base image toolkit (diagnostic)..."
+	@BASE_IMAGE=$(BASE_IMAGE) ./dockerfiles/inspect-base-image.sh
+
+# Verify built image runtime contract (requires image to exist)
+verify-image-runtime: build verify-host-gpu
+	@echo "Verifying built image runtime contract..."
+	@TARGET_IMAGE=$(IMAGE_NAME):$(IMAGE_TAG) ./dockerfiles/check-image-runtime.sh
 
 # Build Docker image
 build: verify-docker prepare-models
@@ -98,7 +117,9 @@ build: verify-docker prepare-models
 	@echo "  Base image: $(BASE_IMAGE)"
 	@echo "  Python version: $(PYTHON_VERSION)"
 	@echo "  TensorRT version: $(TENSORRT_VERSION)"
+	@echo "  CUDA version: $(CUDA_VERSION)"
 	@echo "  Model directory: $(MODEL_SOURCE_DIR)"
+	@echo "  Model name: $(MODEL_NAME)"
 	@echo ""
 	@DOCKER_BUILDKIT=$(DOCKER_BUILDKIT) docker build \
 		--build-arg BASE_IMAGE=$(BASE_IMAGE) \
@@ -114,9 +135,9 @@ build: verify-docker prepare-models
 		.
 	@echo "Build completed: $(IMAGE_NAME):$(IMAGE_TAG)"
 
-# Run smoke test
-test: build verify-gpu
-	@echo "Running TensorRT smoke test..."
+# End-to-end application smoke test (authoritative usability check)
+smoke-test: build verify-host-gpu
+	@echo "Running TensorRT smoke test (end-to-end)..."
 	@echo "Test configuration:"
 	@echo "  Container name: $(CONTAINER_NAME)"
 	@echo "  GPU device: $(GPU_DEVICE)"
@@ -136,6 +157,9 @@ test: build verify-gpu
 		$(TEST_COMMAND)
 	@echo "Smoke test passed"
 
+# Alias for backward compatibility
+test: smoke-test
+
 # Clean up Docker resources
 clean:
 	@echo "Cleaning up Docker resources..."
@@ -145,10 +169,10 @@ clean:
 	@echo "Cleanup completed"
 
 # Development targets
-.PHONY: shell debug logs
+.PHONY: shell debug
 
 # Open interactive shell in container
-shell: build verify-gpu
+shell: build verify-host-gpu
 	@echo "Opening interactive shell..."
 	@docker run \
 		--name $(CONTAINER_NAME)-shell \
@@ -163,7 +187,7 @@ shell: build verify-gpu
 		/bin/bash
 
 # Debug container with additional tools
-debug: build verify-gpu
+debug: build verify-host-gpu
 	@echo "Starting debug container..."
 	@docker run \
 		--name $(CONTAINER_NAME)-debug \
@@ -176,20 +200,3 @@ debug: build verify-gpu
 		-e APP_DIR=$(APP_DIR) \
 		--entrypoint /bin/bash \
 		$(IMAGE_NAME):$(IMAGE_TAG)
-
-# Show container logs
-logs:
-	@docker logs $(CONTAINER_NAME) 2>/dev/null || echo "No logs found for container $(CONTAINER_NAME)"
-
-# Show image info
-info:
-	@echo "Docker Image Information:"
-	@docker images $(IMAGE_NAME):$(IMAGE_TAG) 2>/dev/null || echo "Image not found"
-	@echo ""
-	@echo "Build configuration:"
-	@echo "  Dockerfile: $(DOCKERFILE)"
-	@echo "  Model source: $(MODEL_SOURCE_DIR)"
-	@echo "  Build args:"
-	@echo "    BASE_IMAGE=$(BASE_IMAGE)"
-	@echo "    PYTHON_VERSION=$(PYTHON_VERSION)"
-	@echo "    TENSORRT_VERSION=$(TENSORRT_VERSION)"

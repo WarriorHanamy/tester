@@ -9,7 +9,7 @@ import sys
 import numpy as np
 import tensorrt as trt
 import pycuda.driver as cuda
-import pycuda.autoinit
+import pycuda.autoinit  # noqa: F401  (autoinit performs driver init as side effect)
 import yaml
 
 # Configuration from environment variables

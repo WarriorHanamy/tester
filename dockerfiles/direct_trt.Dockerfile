@@ -37,32 +37,30 @@ RUN ln -sf /usr/bin/python${PYTHON_VERSION} /usr/bin/python3 && \
 # Upgrade pip
 RUN python${PYTHON_VERSION} -m pip install --no-cache-dir --upgrade pip setuptools wheel
 
-# PyTorch 2.x with CUDA 12.6 wheels
-RUN pip3 install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu126
+# Install inference runtime dependencies (TensorRT + ONNX Runtime stack)
+RUN pip3 install --no-cache-dir \
+  tensorrt==${TENSORRT_VERSION} \
+  onnx==1.15.0 \
+  onnxruntime-gpu==${ONNXRUNTIME_VERSION} \
+  numpy \
+  pyyaml \
+  pycuda
 
-CMD ["python3", "--version"]
+# Optional: PyTorch (not required for TensorRT inference; uncomment to enable)
+# ARG PYTORCH_CUDA_SUFFIX=cu126
+# RUN pip3 install --no-cache-dir torch torchvision torchaudio --index-url https://download.pytorch.org/whl/${PYTORCH_CUDA_SUFFIX}
 
-# # Install TensorRT and ONNX Runtime with CUDA support
-# # Using pip packages for easier management
-# RUN pip install --no-cache-dir \
-#   tensorrt==${TENSORRT_VERSION} \
-#   onnx==1.15.0 \
-#   onnxruntime-gpu==${ONNXRUNTIME_VERSION} \
-#   numpy \
-#   pyyaml
-#
-# # Set up model directory
-# RUN mkdir -p ${MODEL_DIR}
-# RUN mkdir -p ${APP_DIR}
-#
-# # Copy the vtol_hover model directory
-# COPY models/${MODEL_NAME}/ ${MODEL_DIR}/${MODEL_NAME}/
-#
-# # Copy inference scripts
-# COPY dockerfiles/inference_smoke_test.py ${APP_DIR}/
-#
-# # Set working directory
-# WORKDIR ${APP_DIR}
-#
-# # Default command to run smoke test
-# CMD ["python3", "inference_smoke_test.py"]
+# Prepare application directories
+RUN mkdir -p ${MODEL_DIR} && mkdir -p ${APP_DIR}
+
+# Copy the vtol_hover model directory (built by Makefile prepare-models)
+COPY models/${MODEL_NAME}/ ${MODEL_DIR}/${MODEL_NAME}/
+
+# Copy inference smoke test script
+COPY dockerfiles/inference_smoke_test.py ${APP_DIR}/
+
+# Set working directory
+WORKDIR ${APP_DIR}
+
+# Default command can be overridden; smoke test is the default app contract
+CMD ["python3", "inference_smoke_test.py"]
