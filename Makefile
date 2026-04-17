@@ -18,13 +18,16 @@ LOCAL_MODEL_DIR := ./models
 # Container configuration
 CONTAINER_NAME ?= trt-smoke-test
 GPU_DEVICE ?= all
+TAG ?= 12.5.1-cudnn-devel-ubuntu22.04
 
 # Build arguments
-BASE_IMAGE ?= nvidia/cuda:12.6.0-runtime-ubuntu22.04
+BASE_IMAGE ?= nvidia/cuda:$(TAG)
+# base image for jetson should cuda 12.6 cuDNN 8.9.6, onnx-runtime 1.16.0, gcc 1.14, python 3.10
+# base image for host should cuda 12.5 cuDNN 8.9.7, onnx-runtime 1.16.0, gcc 8.3.1, python 3.10
 PYTHON_VERSION ?= 3.10
 TENSORRT_VERSION ?= 10.3.0
-ONNXRUNTIME_VERSION ?= 1.17.1
-CUDA_VERSION ?= 12.6
+ONNXRUNTIME_VERSION ?= 1.16.0
+CUDA_VERSION ?= 12.5
 MODEL_DIR ?= /opt/models
 APP_DIR ?= /opt/app
 
