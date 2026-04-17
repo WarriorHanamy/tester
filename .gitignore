@@ -34,3 +34,5 @@ wheels/
 .DS_Store
 Thumbs.db
 resnet*/
+*.engine
+cache/
