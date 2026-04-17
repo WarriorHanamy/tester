@@ -1,130 +1,198 @@
-# TensorRT Inference Docker Environment
+# TensorRT Multi-Stage Docker Environment
 
-Docker-based environment for ONNX model inference using TensorRT with NVIDIA GPU support.
+Docker-based TensorRT workflow that separates engine compilation from runtime inference.
+
+## Architecture
+
+- Builder image: based on `nvidia/cuda:12.5.1-cudnn-devel-ubuntu22.04`, installs TensorRT CLI tooling and uses `trtexec` to compile `ONNX -> .engine`
+- Runtime image: based on `nvidia/cuda:12.5.1-cudnn-runtime-ubuntu22.04`, contains only the runtime stack needed to load and execute the generated engine
+- Makefile: orchestrates model preparation, engine generation, runtime image build, smoke tests, and diagnostics
 
 ## Quick Start
 
 ```bash
-# Verify host GPU compute readiness (optional diagnostic)
+# Optional: verify host GPU and Docker GPU readiness
 make verify-host-gpu
 
-# Build the Docker image
+# Build builder image, compile engine, and build runtime image
 make build
 
-# Run end-to-end smoke test (authoritative application usability check)
-make smoke-test   # or: make test
+# Run the runtime smoke test
+make smoke-test
 
-# Interactive shell
-make shell
+# Inspect the built runtime image contract
+make verify-image-runtime
 ```
 
-## Configuration
+## Main Targets
 
-All configuration is done via Makefile variables or environment variables:
+### Build pipeline
+- `make build-builder` - Build the `trtexec` builder image
+- `make build-engine` - Generate `engine-output/<model>.engine` from the ONNX model
+- `make build-runtime` - Build the runtime image and bake the generated engine into it
+- `make build-all` - Run the full builder -> engine -> runtime pipeline
+- `make build` - Alias for `build-all`
 
-```bash
-# Custom image name
-IMAGE_NAME=my-trt-model make build
-
-# Custom model directory
-MODEL_SOURCE_DIR=/path/to/models make build
-
-# Custom TensorRT version
-TENSORRT_VERSION=10.1.0 make build
-```
-
-## Available Targets
-
-### Build & Test
-- `make build` — Build the Docker image
-- `make smoke-test` — Run end-to-end application smoke test (recommended)
-- `make test` — Alias for `smoke-test`
-- `make clean` — Remove Docker image, containers, and local model copy
-
-### Verification & Diagnostics
-- `make verify-docker` — Check Docker installation and daemon
-- `make verify-host-gpu` — Check host GPU drivers and Docker GPU compute readiness
-- `make inspect-base-image` — Inspect base CUDA image toolkit versions (diagnostic only)
-- `make verify-image-runtime` — Verify built image starts and exposes required runtime contract (preflight)
+### Validation and diagnostics
+- `make smoke-test` - Run the runtime container and execute `run_inference.py`
+- `make test` - Alias for `smoke-test`
+- `make verify-docker` - Verify Docker daemon availability
+- `make verify-host-gpu` - Verify host NVIDIA driver and Docker GPU access
+- `make inspect-base-image` - Inspect the configured runtime base image
+- `make verify-image-runtime` - Verify the built runtime image exposes the expected runtime contract
 
 ### Development
-- `make shell` — Open interactive shell in the built container
-- `make debug` — Start debug container with bash entrypoint
-- `make help` — Show all available targets and configuration
+- `make shell` - Start an interactive shell in the runtime image
+- `make debug` - Start a debug shell in the runtime image
+- `make clean-all` - Remove generated models, engine artifacts, and both images
+- `make clean` - Alias for `clean-all`
+
+## Makefile Configuration
+
+```bash
+# Custom image names
+IMAGE_NAME=my-trt-runtime BUILDER_IMAGE_NAME=my-trt-builder make build
+
+# Custom model source
+MODEL_SOURCE_DIR=/path/to/policies make build
+
+# Custom engine filename
+ENGINE_FILE=my_policy.engine make build-runtime
+
+# Custom trtexec flags
+TRTEXEC_FLAGS='--fp16 --verbose' make build-engine
+```
+
+Important variables:
+
+- `IMAGE_NAME` - Runtime image name
+- `BUILDER_IMAGE_NAME` - Builder image name
+- `IMAGE_TAG` - Shared image tag for both images
+- `MODEL_SOURCE_DIR` - Host directory containing versioned model directories
+- `MODEL_NAME` - Logical model name copied into `./models/<MODEL_NAME>`
+- `ONNX_FILE` - ONNX filename inside the prepared model directory
+- `METADATA_FILE` - Metadata filename copied into the runtime image
+- `ENGINE_OUTPUT_DIR` - Host directory where generated engines are stored
+- `ENGINE_FILE` - Generated engine filename
+- `TRTEXEC_FLAGS` - Extra `trtexec` flags passed during engine generation (default: `--fp16 --skipInference`)
+- `GPU_DEVICE` - GPU selector for `docker run`
+- `BUILDER_BASE_IMAGE` - CUDA devel image for the builder
+- `RUNTIME_BASE_IMAGE` - CUDA runtime image for the runtime image
+
+## trtexec Guide
+
+`trtexec` is NVIDIA's production CLI for TensorRT engine building, benchmarking, and inspection.
+
+### Project-integrated usage
+
+```bash
+# Default compile-only FP16 build
+make build-engine
+
+# FP16 build with verbose logs
+TRTEXEC_FLAGS='--fp16 --verbose' make build-engine
+
+# Dynamic shape example
+TRTEXEC_FLAGS='--fp16 --minShapes=input:1x14 --optShapes=input:8x14 --maxShapes=input:32x14' make build-engine
+
+# Rebuild runtime image after generating a new engine
+make build-runtime
+```
+
+### Manual builder invocation
+
+```bash
+make build-builder prepare-models
+mkdir -p engine-output
+
+docker run --rm --gpus all \
+  -v "$PWD/models:/opt/models" \
+  -v "$PWD/engine-output:/opt/engine" \
+  trt-inference-builder:latest \
+  --onnx=/opt/models/vtol_hover/model.onnx \
+  --saveEngine=/opt/engine/vtol_hover.engine \
+  --fp16 --skipInference
+```
+
+### Common trtexec flags
+
+- `--fp16` - Enable FP16 tactics
+- `--skipInference` - Build the engine without running the default benchmark pass
+- `--int8` - Enable INT8 tactics
+- `--shapes=name:1x14` - Set a fixed input shape
+- `--minShapes`, `--optShapes`, `--maxShapes` - Configure dynamic shape profiles
+- `--verbose` - Print detailed builder logs
+- `--workspace=N` - Control workspace size in MiB
+- `--loadEngine=file.engine` - Load an existing engine for benchmarking
+
+### Benchmark an existing engine
+
+```bash
+docker run --rm --gpus all \
+  -v "$PWD/engine-output:/opt/engine" \
+  trt-inference-builder:latest \
+  --loadEngine=/opt/engine/vtol_hover.engine \
+  --useCudaGraph \
+  --noDataTransfers
+```
+
+## Runtime Contract
+
+The runtime image now expects:
+
+- `run_inference.py` under `/opt/app`
+- prebuilt engine artifact under `/opt/engine/<ENGINE_FILE>`
+- optional metadata under `/opt/models/<MODEL_NAME>/<METADATA_FILE>`
+
+The runtime image does not need:
+
+- `trtexec`
+- ONNX parser tooling for engine build
+- `onnxruntime`
+- `onnx`
+- the full CUDA devel toolchain
 
 ## Directory Structure
 
-```
+```text
 .
 ├── dockerfiles/
-│   ├── direct_trt.Dockerfile          # Main Dockerfile
-│   ├── inference_smoke_test.py        # Smoke test script (end-to-end app)
-│   ├── check-host-gpu.sh              # Host GPU compute readiness check
-│   ├── inspect-base-image.sh          # Base image toolkit diagnostics
-│   └── check-image-runtime.sh         # Built image runtime contract check
-├── models/                             # Local model copy (auto-generated)
-├── Makefile                            # Build, verify, and test automation
+│   ├── builder.Dockerfile
+│   ├── runtime.Dockerfile
+│   ├── run_inference.py
+│   ├── check-host-gpu.sh
+│   ├── inspect-base-image.sh
+│   └── check-image-runtime.sh
+├── engine-output/                  # Generated TensorRT engines
+├── models/                         # Prepared model copy for local builds
+├── Makefile
 └── README.md
 ```
 
-## Environment Variables
-
-### Container runtime
-- `MODEL_NAME` — Model directory name (default: vtol_hover)
-- `ONNX_FILE` — ONNX model filename (default: model.onnx)
-- `METADATA_FILE` — Metadata filename (default: observations_metadata.yaml)
-- `MODEL_DIR` — Container model directory (default: /opt/models)
-- `APP_DIR` — Container app directory (default: /opt/app)
-
-### Build & runtime control
-- `IMAGE_NAME` — Docker image name (default: trt-inference)
-- `IMAGE_TAG` — Docker image tag (default: latest)
-- `BASE_IMAGE` — Base CUDA image for build (default: nvidia/cuda:12.5.1-cudnn-devel-ubuntu22.04)
-- `PYTHON_VERSION` — Python version to install (default: 3.10)
-- `TENSORRT_VERSION` — TensorRT pip package version (default: 10.3.0)
-- `ONNXRUNTIME_VERSION` — ONNX Runtime GPU version (default: 1.16.0)
-- `CUDA_VERSION` — CUDA version (default: 12.5)
-- `GPU_DEVICE` — GPU device(s) to expose to container (default: all)
-- `MODEL_SOURCE_DIR` — Host path containing model directories (default: ~/server/policies/vtol_hover)
-
-## GPU Requirements
-
-- NVIDIA GPU with CUDA support
-- NVIDIA driver installed on host
-- `nvidia-container-toolkit` installed for Docker GPU support
-- `Docker` daemon running with NVIDIA runtime configured
-
 ## Troubleshooting
 
-### GPU not available in container
+### Docker cannot see the GPU
 
 ```bash
-# 1) Verify host GPU compute readiness
 make verify-host-gpu
+```
 
-# 2) Verify the built image can start with GPU
+### Runtime image contract check fails
+
+```bash
 make verify-image-runtime
-
-# Or manually test (replace with your BASE_IMAGE if customized)
-docker run --rm --gpus all "${BASE_IMAGE:-nvidia/cuda:12.6.0-runtime-ubuntu22.04}" nvidia-smi
 ```
 
-### Smoke test fails
+### trtexec engine build fails
 
 ```bash
-# Check model files exist
-ls -la ~/server/policies/vtol_hover/
+# Re-run with verbose logs and explicit shapes if needed
+TRTEXEC_FLAGS='--fp16 --verbose --shapes=input:1x14' make build-engine
+```
 
-# Rebuild with verbose output
-make clean && IMAGE_NAME=my-trt-model make build
+### Smoke test fails after engine generation
+
+```bash
 make smoke-test
+make shell
 ```
-
-### Model not found
-
-Ensure the model directory exists:
-```bash
-ls -la ~/server/policies/vtol_hover/
-```
-
-The Makefile automatically copies the latest model directory to `./models/` during build.

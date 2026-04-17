@@ -10,7 +10,12 @@
 
 ## Feasibility
 
-**可行** - `trtexec` 是 NVIDIA 随 TensorRT 分发的生产级 C++ CLI 工具:
+**可行** - 当前代码库已有良好基础:
+- Dockerfile 已完成依赖安装 (tensorrt, onnx, pycuda, numpy, pyyaml)
+- Makefile 已有结构化 verification targets (`verify-host-gpu`, `inspect-base-image`, `verify-image-runtime`)
+- 脚本已拆分为独立职责 (`check-host-gpu.sh`, `inspect-base-image.sh`, `check-image-runtime.sh`)
+
+`trtexec` 可直接使用:
 - 包含在 `nvidia/cuda:12.5.1-cudnn-devel-ubuntu22.04` 的 TensorRT 安装中
 - 路径: `/usr/src/tensorrt/bin/trtexec` (deb/tar 安装) 或 `/opt/tensorrt/bin/trtexec` (NGC 容器)
 - 完全覆盖 `inference_smoke_test.py` 中 `build_engine()` 的所有功能
@@ -31,13 +36,17 @@
 
 **结论**: 自写 builder 脚本是在重复造轮子。trtexec 是 NVIDIA 为此场景专门设计的工具。
 
-### 现状分析
+### 现状分析 (commit 424d430 后)
 
 | 文件 | 现状 | 问题 |
 |------|------|------|
-| `dockerfiles/direct_trt.Dockerfile` | 使用 `devel` 镜像, TensorRT 安装被注释 | 功能不完整, 仅安装了 PyTorch |
-| `Makefile` | 单一 `build` target | 无法区分构建阶段 |
-| `dockerfiles/inference_smoke_test.py` | `build_engine()` + `run_inference()` 耦合 | 职责不分, 顶层 pycuda import |
+| `dockerfiles/direct_trt.Dockerfile` | 完整安装 tensorrt/onnx/pycuda, 无 PyTorch, CMD 指向 inference_smoke_test.py | 单阶段, devel 镜像过大, 编译工具链随 Runtime 镜像发布 |
+| `Makefile` | 已有 `build`, `smoke-test`, `verify-docker`, `verify-host-gpu`, `inspect-base-image`, `verify-image-runtime` | 缺少多阶段构建 targets |
+| `dockerfiles/inference_smoke_test.py` | `build_engine()` + `run_inference()` 耦合, 顶层 pycuda import | Builder/Runtime 职责不分 |
+| `dockerfiles/check-host-gpu.sh` | Host GPU + Docker GPU compute readiness | ✅ 已拆分, 职责清晰 |
+| `dockerfiles/inspect-base-image.sh` | Base image toolkit 诊断 | ✅ 已拆分 |
+| `dockerfiles/check-image-runtime.sh` | Built image runtime contract 验证 | ⚠️ 验证了 onnx/onnxruntime, Runtime 阶段不再需要这些包, 需同步更新 |
+| `README.md` | 已有 Quick Start, targets 文档, 环境变量, troubleshooting | 缺少 trtexec 使用指南 |
 | `.dockerignore` | 排除 `Dockerfile*`, `*.sh`, `Makefile` | 多 Dockerfile 构建时需调整 |
 
 ### trtexec 关键用法 (来自 NVIDIA 官方文档)
@@ -189,7 +198,19 @@ build-engine: build-builder prepare-models
 **依赖**: 无
 **完成标志**: `docker build` 上下文大小合理
 
-#### Child 6: README.md 添加 trtexec 使用指南
+#### Child 6: 更新 check-image-runtime.sh 适配 Runtime 镜像
+
+**Delivers**: 更新后的 `dockerfiles/check-image-runtime.sh`
+
+当前脚本检查 `onnx` 和 `onnxruntime` 包的存在 — 但 Runtime 阶段不再需要这些 (engine 已预编译)。需要:
+- 移除 `onnx` 和 `onnxruntime` 包检查
+- 更新 entrypoint 检查: 从 `inference_smoke_test.py` 改为 `run_inference.py`
+- 更新 engine 文件存在性检查 (替代 model.onnx)
+
+**依赖**: Child 1, Child 3
+**完成标志**: `make verify-image-runtime` 在 runtime 镜像上通过
+
+#### Child 7: README.md 添加 trtexec 使用指南
 
 **Delivers**: `README.md` 中新增 `trtexec` 使用指南章节
 
@@ -213,16 +234,19 @@ build-engine: build-builder prepare-models
 | 3 | `dockerfiles/runtime.Dockerfile` — 推理运行时镜像 | Child 3 |
 | 4 | Makefile 更新 — 多阶段构建 targets | Child 4 |
 | 5 | `.dockerignore` 更新 | Child 5 |
-| 6 | `README.md` — trtexec 使用指南 | Child 6 |
+| 6 | `dockerfiles/check-image-runtime.sh` 更新 — 适配 runtime 镜像 | Child 6 |
+| 7 | `README.md` — trtexec 使用指南 | Child 7 |
 
 ## Acceptance
 
 - [ ] `make build-all` 成功构建 builder 和 runtime 两个镜像
-- [ ] `make test-runtime` 在 runtime 镜像上完成推理 smoke test
+- [ ] `make test-runtime` (或 `make smoke-test`) 在 runtime 镜像上完成推理 smoke test
+- [ ] `make verify-image-runtime` 在 runtime 镜像上通过
 - [ ] Runtime 镜像体积 < Builder 镜像体积的 60%
-- [ ] Runtime 镜像不含 nvcc, trtexec, build-essential, cmake, PyTorch
+- [ ] Runtime 镜像不含 nvcc, trtexec, build-essential, cmake, PyTorch, onnx, onnxruntime
 - [ ] Builder 镜像不含 Python, pycuda, PyTorch
 - [ ] `inference_smoke_test.py` 已删除
+- [ ] 现有 `make verify-host-gpu`, `make inspect-base-image` 仍可工作 (不受多阶段影响)
 
 ## Constraints
 
@@ -243,6 +267,7 @@ Builder 阶段完全不需要 Python runtime — trtexec 是纯 C++ 二进制。
 ### 其他约束
 
 - `inference_smoke_test.py` 直接删除
+- `check-image-runtime.sh` 需同步更新: 移除 onnx/onnxruntime 检查, 更新 entrypoint 和文件存在性检查
 - Builder 和 Runtime 的 CUDA/cuDNN 版本必须匹配 (12.5.1)
 - `.engine` 文件是 GPU 架构特定的, 不可跨平台移植
 - Builder 仍需 GPU 设备 (trtexec 需要 GPU 做图优化), 通过 `docker run --gpus` 传入
